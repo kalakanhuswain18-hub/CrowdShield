@@ -115,22 +115,41 @@ classDef toneMint fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
 classDef toneRose fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337
 classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
+
 class node_sim_app,node_crowd_engine,node_telemetry_sync,node_cv_pipeline toneBlue
 class node_api,node_crowd_router,node_live_store,node_risk_router,node_risk_engine,node_recommendations,node_db_adapter toneAmber
 class node_supabase,node_schema toneMint
 class node_web_app,node_web_routes,node_web_live_data,node_mobile_app,node_mobile_api,node_notifications toneRose
 class node_expo_notifications toneNeutral
-
-
 ```
+
 ### Data Flow (end-to-end)
-Simulation tick (1/s) → per-zone metrics → POST /api/crowd/metrics (5 zones)
-        → FastAPI validates (Pydantic) → upsert in-memory latest_metrics
-        → insert into Supabase crowd_data (if migrations applied)
-Risk Engine (density/speed/surge/bottleneck/flow_conflict) → 0-100 score + level + reasons
-        → insert into Supabase risk_events (on level change only)
-Dashboard polls (2s) → GET /api/crowd/metrics + /api/risk/events
-        → renders live cards, map, camera feed, alert feed, telemetry
+
+```text
+Simulation tick (1/s)
+    ↓
+Per-zone metrics
+    ↓
+POST /api/crowd/metrics (5 zones)
+    ↓
+FastAPI validates (Pydantic)
+    ↓
+Upsert in-memory latest_metrics
+    ↓
+Insert into Supabase crowd_data (if migrations applied)
+
+Risk Engine
+(density / speed / surge / bottleneck / flow_conflict)
+    ↓
+0–100 score + level + reasons
+    ↓
+Insert into Supabase risk_events (on level change only)
+
+Dashboard polls (2s)
+    ↓
+GET /api/crowd/metrics + /api/risk/events
+    ↓
+Live cards + map + camera feed + alert feed + telemetry
 ```
 
 ---
@@ -166,24 +185,33 @@ Dashboard polls (2s) → GET /api/crowd/metrics + /api/risk/events
 Defined in `Server/services/risk_engine.py`.
 
 | Signal | Weight | Trigger |
-| --- | --- | --- |
+| --- | ---: | --- |
 | High Crowd Density | 35 | `density > 0.00005` |
 | High Movement Speed | 20 | `average_speed > 1.5` |
 | Crowd Surge | 15 | `surge_detected == true` |
 | Bottleneck | 10 | `bottleneck == true` |
 | Flow Conflict | 10 | `flow_conflict == true` (opposing movement in a zone) |
 
-**Levels:**
+### Risk Levels
 
 | Level | Score | Operator Response (`recommendation_engine.py`) |
-| --- | --- | --- |
+| --- | ---: | --- |
 | SAFE | 0–30 | Situation normal, continue monitoring |
 | WARNING | 31–60 | Increase CCTV monitoring, alert nearby security |
 | HIGH | 61–80 | Deploy security team, control entry gate, broadcast warning |
 | CRITICAL | 81–100 | Close gate G3, open exit E2, redirect crowd, call emergency team |
 
 **Input keys:** `density`, `average_speed`, `surge_detected`, `bottleneck`, `flow_conflict`
-**Output:** `{ "risk_score": int, "risk_level": "SAFE"|"WARNING"|"HIGH"|"CRITICAL", "reasons": string[] }`
+
+**Output:**
+
+```json
+{
+  "risk_score": int,
+  "risk_level": "SAFE"|"WARNING"|"HIGH"|"CRITICAL",
+  "reasons": string[]
+}
+```
 
 > On the dashboard, risk levels map to **green (SAFE) / yellow (WARNING) / orange (HIGH) / red (CRITICAL)**.
 
@@ -202,7 +230,9 @@ Defined in `Server/services/risk_engine.py`.
 | POST | `/api/risk/calculate` | Compute risk score + persist event | `Metrics` JSON |
 | POST | `/api/recommendations` | Compute risk + get level-gated actions | `Metrics` JSON |
 
-### `Metrics` payload (Pydantic model — `Server/models.py`)
+### `Metrics` Payload
+
+Pydantic model — `Server/models.py`
 
 ```json
 {
@@ -219,9 +249,7 @@ Defined in `Server/services/risk_engine.py`.
 }
 ```
 
-> Note: `POST /api/crowd/metrics` accepts `speed` (alias) and internally maps it to
-> `average_speed` (`ConfigDict(populate_by_name=True)` + `validation_alias="speed"`),
-> so the API also emits `average_speed`.
+> Note: `POST /api/crowd/metrics` accepts `speed` (alias) and internally maps it to `average_speed` (`ConfigDict(populate_by_name=True)` + `validation_alias="speed"`), so the API also emits `average_speed`.
 
 ---
 
@@ -232,15 +260,18 @@ Run migrations in order in the **Supabase SQL Editor**:
 1. `App/db/migrations/0001_db_init.sql` — schema + RLS + auto-profile trigger
 2. `App/db/migrations/0002_backend_persistence.sql` — adds `surge_detected` / `bottleneck` columns and anon INSERT policies for backend persistence
 
-**Tables:** `profiles`, `venues`, `crowd_data`, `risk_events`, `incidents`, `alerts`
+**Tables:**
 
-**Note:** The anon key cannot run DDL — applying `0002` is required for live inserts
-to work from the Server (see the *Blocked* note in Work State).
+- `profiles`
+- `venues`
+- `crowd_data`
+- `risk_events`
+- `incidents`
+- `alerts`
 
-> **Known gap:** `flow_conflict` is consumed by the risk engine and posted by the
-> simulation, but it is **not yet persisted** to `crowd_data` (the insert in
-> `Server/db.py` omits it). A `0003` migration adding the column + an
-> `insert_crowd_data` update would close this gap.
+> **Note:** The anon key cannot run DDL — applying `0002` is required for live inserts to work from the Server (see the *Blocked* note in Work State).
+
+> **Known gap:** `flow_conflict` is consumed by the risk engine and posted by the simulation, but it is **not yet persisted** to `crowd_data` (the insert in `Server/db.py` omits it). A `0003` migration adding the column + an `insert_crowd_data` update would close this gap.
 
 ---
 
@@ -290,29 +321,42 @@ Notes:
 ```bash
 cd Server
 pip install -r requirements.txt
+
 # create Server/.env
-#   SUPABASE_URL=https://<project>.supabase.co
-#   SUPABASE_ANON_KEY=<anon key>
+# SUPABASE_URL=https://<project>.supabase.co
+# SUPABASE_ANON_KEY=<anon key>
+
 uvicorn main:app --reload --port 8000
 ```
 
-Swagger UI → `http://localhost:8000/docs`
+Swagger UI:
 
-> No `SUPABASE_URL`/key? The server still boots and the in-memory metrics +
-> risk engine work — only DB persistence degrades gracefully.
+```text
+http://localhost:8000/docs
+```
+
+> No `SUPABASE_URL`/key? The server still boots and the in-memory metrics + risk engine work — only DB persistence degrades gracefully.
 
 ### 2. Admin Dashboard (`Web/`)
 
 ```bash
 cd Web
 npm install
+
 # create Web/.env
-#   VITE_SUPABASE_URL=https://<project>.supabase.co
-#   VITE_SUPABASE_ANON_KEY=<anon key>
-#   VITE_API_URL=http://localhost:8000
-npm run dev        # http://localhost:5173
-npm run build      # production build
-npm run lint       # eslint
+# VITE_SUPABASE_URL=https://<project>.supabase.co
+# VITE_SUPABASE_ANON_KEY=<anon key>
+# VITE_API_URL=http://localhost:8000
+
+npm run dev
+npm run build
+npm run lint
+```
+
+Dashboard:
+
+```text
+http://localhost:5173
 ```
 
 ### 3. Simulation (`Simulation/`)
@@ -320,30 +364,48 @@ npm run lint       # eslint
 ```bash
 cd Simulation
 npm install
-npm run dev        # http://localhost:3000
+npm run dev
 ```
 
-Streaming to the server is **off by default** (`TelemetrySync.js`). Enable it in
-the simulation UI (toggle) so it starts posting each zone's telemetry to
-`POST /api/crowd/metrics`. The sim streams **5 zones** (ZONE_A…ZONE_E) once per
-tick, each with `density`, `speed`, `surge_detected`, `bottleneck`, and
-`flow_conflict`. If the server is offline it retries with a **15-second backoff**
-so the console stays clean.
+Simulation:
+
+```text
+http://localhost:3000
+```
+
+Streaming to the server is **off by default** (`TelemetrySync.js`). Enable it in the simulation UI (toggle) so it starts posting each zone's telemetry to:
+
+```text
+POST /api/crowd/metrics
+```
+
+The sim streams **5 zones** (ZONE_A…ZONE_E) once per tick, each with:
+
+- `density`
+- `speed`
+- `surge_detected`
+- `bottleneck`
+- `flow_conflict`
+
+If the server is offline it retries with a **15-second backoff** so the console stays clean.
 
 ### 4. Citizen App (`App/`)
 
 ```bash
 cd App
 npm install
+
 # create App/.env
-#   EXPO_PUBLIC_API_URL=http://<your-lan-ip>:8000
-#   EXPO_PUBLIC_SUPABASE_URL=...
-#   EXPO_PUBLIC_SUPABASE_ANON_KEY=...
-npx expo start     # scan QR with Expo Go
+# EXPO_PUBLIC_API_URL=http://<your-lan-ip>:8000
+# EXPO_PUBLIC_SUPABASE_URL=...
+# EXPO_PUBLIC_SUPABASE_ANON_KEY=...
+
+npx expo start
 ```
 
-> Expo SDK 54 — consult the versioned docs at
-> `https://docs.expo.dev/versions/v54.0.0/` before changing Expo code.
+Scan the QR code with Expo Go.
+
+> Expo SDK 54 — consult the versioned docs at `https://docs.expo.dev/versions/v54.0.0/` before changing Expo code.
 
 ---
 
@@ -363,14 +425,26 @@ npx expo start     # scan QR with Expo Go
 
 ## 🎬 Demo Flow
 
-```
+```text
 1. Launch Server (uvicorn :8000)
-2. Launch Simulation (:3000) → toggle streaming ON
-3. Launch Dashboard (:5173) → login (Supabase auth) → dashboard
-4. Simulation drives crowds in 5 zones → per-zone telemetry POSTed every second
-5. Dashboard polls live metrics + risk events → cards/map/camera feed/alert feed update
-6. Trigger a surge/bottleneck/flow-conflict in the simulation → risk_score climbs
+
+2. Launch Simulation (:3000)
+   → toggle streaming ON
+
+3. Launch Dashboard (:5173)
+   → login (Supabase auth)
+   → dashboard
+
+4. Simulation drives crowds in 5 zones
+   → per-zone telemetry POSTed every second
+
+5. Dashboard polls live metrics + risk events
+   → cards/map/camera feed/alert feed update
+
+6. Trigger a surge/bottleneck/flow-conflict in the simulation
+   → risk_score climbs
    → CRITICAL alert (red) appears in dashboard + app
+
 7. App user reports an incident / receives a push notification
 ```
 
@@ -398,11 +472,14 @@ npx expo start     # scan QR with Expo Go
 
 ## 📄 License
 
-MIT License
+This project is licensed under the **MIT License**.
+
+See the [`LICENSE`](./LICENSE) file for the full license text.
 
 ---
 
 ## 👨‍💻 Author
 
 Built for hackathon innovation 🚀
-Focus: **AI + Real-time systems + Public Safety**
+
+**Focus:** **AI + Real-time systems + Public Safety**
